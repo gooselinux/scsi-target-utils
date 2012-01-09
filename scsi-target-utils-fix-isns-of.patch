@@ -1,0 +1,47 @@
+diff -aurp tgt-20091205/usr/iscsi/isns.c tgt-20091205.work/usr/iscsi/isns.c
+--- tgt-20091205/usr/iscsi/isns.c	2010-06-27 22:46:36.000000000 -0500
++++ tgt-20091205.work/usr/iscsi/isns.c	2010-06-28 16:43:04.000000000 -0500
+@@ -604,17 +604,23 @@ static char *print_scn_pdu(struct isns_h
+ 	struct isns_tlv *tlv = (struct isns_tlv *) hdr->pdu;
+ 	uint16_t function, length, flags, transaction, sequence;
+ 	char *name = NULL;
++	static char iscsi_name[224];
+ 
+ 	get_hdr_param(hdr, function, length, flags, transaction, sequence);
+ 
+ 	while (length) {
+ 		uint32_t vlen = ntohl(tlv->length);
+ 
++		if (vlen + sizeof(*tlv) > length)
++			vlen = length - sizeof(*tlv);
++
+ 		switch (ntohl(tlv->tag)) {
+ 		case ISNS_ATTR_ISCSI_NAME:
+ 			eprintf("scn name: %u, %s\n", vlen, (char *) tlv->value);
+-			if (!name)
+-				name = (char *) tlv->value;
++			if (!name) {
++				snprintf(iscsi_name, sizeof(iscsi_name), (char *)tlv->value);
++				name = iscsi_name;
++			}
+ 			break;
+ 		case ISNS_ATTR_TIMESTAMP:
+ /* 			log_error("%u : %u : %" PRIx64, ntohl(tlv->tag), vlen, */
+@@ -675,11 +681,17 @@ found:
+ 
+ 	/* skip status */
+ 	tlv = (struct isns_tlv *) ((char *) hdr->pdu + 4);
++
++	if (length < 4)
++		goto free_qry_mgmt;
+ 	length -= 4;
+ 
+ 	while (length) {
+ 		uint32_t vlen = ntohl(tlv->length);
+ 
++		if (vlen + sizeof(*tlv) > length)
++			vlen = length - sizeof(*tlv);
++
+ 		switch (ntohl(tlv->tag)) {
+ 		case ISNS_ATTR_ISCSI_NAME:
+ 			name = (char *) tlv->value;

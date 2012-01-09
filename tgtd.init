@@ -1,0 +1,239 @@
+#!/bin/sh
+#
+# chkconfig: - 39 35
+#
+### BEGIN INIT INFO
+# Provides:          tgtd
+# Required-Start:    $network
+# Short-Description: Starts and stops the generic storage target daemon
+# Description: tgtd provides the SCSI and software transport target state
+#              machine daemon.
+### END INIT INFO
+#
+#
+# pidfile: /var/run/tgtd.pid
+#
+# Source function library.
+. /etc/init.d/functions
+
+PATH=/sbin:/bin:/usr/sbin:/usr/bin
+TGTD_CONFIG=/etc/tgt/targets.conf
+
+prog="SCSI target daemon"
+exec=tgtd
+lockfile=/var/lock/subsys/$exec
+
+start()
+{
+	# Check for and source configuration file otherwise use defaults above
+	[ -f /etc/sysconfig/$exec ] && . /etc/sysconfig/$exec
+
+	[ -x /usr/sbin/$exec ] || exit 5
+	echo -n $"Starting $prog: "
+	# Note /dev/null redirection to silence rdma not found messages
+	daemon $exec >/dev/null 2>&1
+	retval=$?
+	if [ $retval -ne 0 ] ; then
+		failure
+		echo
+		return $retval
+	fi
+
+	success
+	echo
+	touch $lockfile
+
+	# Put tgtd into "offline" state until all the targets are configured.
+	# We don't want initiators to (re)connect and fail the connection
+	# if it's not ready.
+	tgtadm --op update --mode sys --name State -v offline
+	# Configure the targets.
+	tgt-admin -e -c $TGTD_CONFIG
+	# Put tgtd into "ready" state.
+	tgtadm --op update --mode sys --name State -v ready
+
+	return 0
+}
+
+stop()
+{
+	if [ "$RUNLEVEL" == 0 -o "$RUNLEVEL" == 6 ] ; then
+		force_stop
+		return $?
+	fi
+
+	echo -n $"Stopping $prog: "
+	# Remove all targets. It only removes targets which are not in use.
+	tgt-admin --update ALL -c /dev/null >/dev/null 2>&1
+	# tgtd will exit if all targets were removed
+	tgtadm --op delete --mode system >/dev/null 2>&1
+	retval=$?
+	if [ "$retval" -eq 107 ] ; then
+		echo -n $"not running"
+		failure
+		echo
+		return 7
+	elif [ "$retval" -ne 0 ] ; then
+		echo -n $"initiators still connected"
+		failure
+		echo
+		return 1
+	fi
+
+	success
+	echo
+	rm -f $lockfile
+	return 0
+}
+
+force_stop()
+{
+	# NOTE: Forced shutdown of the iscsi target may cause data corruption
+	# for initiators that are connected.
+	echo -n $"Force-stopping $prog: "
+	# Offline everything first. May be needed if we're rebooting, but
+	# expect the initiators to reconnect cleanly when we boot again
+	# (i.e. we don't want them to reconnect to a tgtd which is still
+	# working, but the target is gone).
+	tgtadm --op update --mode sys --name State -v offline >/dev/null 2>&1
+	retval=$?
+	if [ "$retval" -eq 107 ] ; then
+		echo -n $"not running"
+		failure
+		echo
+		return 7
+	else
+		tgt-admin --offline ALL
+		# Remove all targets, even if they are still in use.
+		tgt-admin --update ALL -c /dev/null -f
+		# It will shut down tgtd only after all targets were removed.
+		tgtadm --op delete --mode system
+		retval=$?
+		if [ "$retval" -ne 0 ] ; then
+			failure
+			echo
+			return 1
+		fi
+	fi
+
+	success
+	echo
+	rm -f $lockfile
+	return 0
+}
+
+reload() {
+	# Check for and source configuration file otherwise use defaults above
+	[ -f /etc/sysconfig/$exec ] && . /etc/sysconfig/$exec
+
+	echo -n $"Updating $prog configuration: "
+	# Update configuration for targets. Only targets which
+	# are not in use will be updated.
+	tgt-admin --update ALL -c $TGTD_CONFIG >/dev/null 2>&1
+	retval=$?
+	if [ "$retval" -eq 107 ] ; then
+		echo -n $"not running"
+		failure
+		echo
+		return 7
+	elif [ "$retval" -ne 0 ] ; then
+		failure
+		echo
+		return 1
+	fi
+
+	success
+	echo
+	return 0
+}
+
+force_reload() {
+	# Check for and source configuration file otherwise use defaults above
+	[ -f /etc/sysconfig/$exec ] && . /etc/sysconfig/$exec
+
+	echo -n $"Force-updating $prog configuration: "
+	# Update configuration for targets, even those in use.
+	tgt-admin --update ALL -f -c $TGTD_CONFIG >/dev/null 2>&1
+	retval=$?
+	if [ "$retval" -eq 107 ] ; then
+		echo -n $"not running"
+		failure
+		echo
+		return 7
+	elif [ "$retval" -ne 0 ] ; then
+		failure
+		echo
+		return 1
+	fi
+
+	success
+	echo
+	return 0
+}
+
+restart() {
+	stop
+	start
+}
+
+rh_status() {
+	# run checks to determine if the service is running or use generic status
+	status $exec
+}
+
+rh_status_q() {
+	rh_status >/dev/null 2>&1
+}
+
+case "$1" in
+	start)
+		[ `id -u` = 0 ] || exit 4
+
+		rh_status_q && exit 0
+		$1
+		;;
+	stop)
+		[ `id -u` = 0 ] || exit 4
+
+		rh_status_q || exit 0
+		$1
+		;;
+	force-stop)
+		[ `id -u` = 0 ] || exit 4
+		force_stop
+		;;
+	restart)
+		[ `id -u` = 0 ] || exit 4
+
+		restart
+		;;
+	force-restart)
+		[ `id -u` = 0 ] || exit 4
+
+		force_stop
+		start
+		;;
+	reload)
+		[ `id -u` = 0 ] || exit 4
+
+		rh_status_q || exit 7
+		$1
+		;;
+	force-reload)
+		[ `id -u` = 0 ] || exit 4
+		force_reload
+		;;
+	status)
+		rh_status
+		;;
+	condrestart|try-restart)
+		[ `id -u` = 0 ] || exit 4
+
+		rh_status_q || exit 0
+		restart
+		;;
+	*)
+		echo $"Usage: $0 {start|stop|status|restart|condrestart|try-restart|reload|force-stop|force-restart|force-reload}"
+		exit 2
+esac
+exit $?

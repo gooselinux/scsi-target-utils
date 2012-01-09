@@ -1,0 +1,91 @@
+diff -aurp tgt-1.0.1/conf/examples/targets.conf.example tgt-1.0.1.isns/conf/examples/targets.conf.example
+--- tgt-1.0.1/conf/examples/targets.conf.example	2010-03-31 15:13:33.000000000 -0500
++++ tgt-1.0.1.isns/conf/examples/targets.conf.example	2010-03-31 15:32:23.000000000 -0500
+@@ -11,6 +11,13 @@ include /etc/tgt/temp/*.conf
+ default-driver iscsi
+ 
+ 
++# Set iSNS parameters, if needed
++
++#iSNSServerIP 192.168.111.222
++#iSNSServerPort 3205
++#iSNSAccessControl On
++#iSNS On
++
+ # Continue if tgtadm exits with non-zero code (equivalent of
+ # --ignore-errors command line option)
+ #ignore-errors yes
+diff -aurp tgt-1.0.1/scripts/tgt-admin tgt-1.0.1.isns/scripts/tgt-admin
+--- tgt-1.0.1/scripts/tgt-admin	2010-03-31 15:13:33.000000000 -0500
++++ tgt-1.0.1.isns/scripts/tgt-admin	2010-03-31 15:32:23.000000000 -0500
+@@ -90,6 +90,23 @@ my %tgtadm_output_name;
+ my @largest_tid;
+ my $next_tid;
+ 
++# Look up if iSNS is already on
++sub check_isns {
++	# We need to run as root
++	if ( $> ) {
++		die("You must be root to run this program.\n");
++	}
++
++	my @show_sys = `tgtadm --op show --mode sys`;
++	foreach my $sys_line (@show_sys) {
++		if ($sys_line =~ m/iSNS=On/) {
++			return 1;
++		}
++	}
++	# iSNS is not enabled if we're here
++	return 0;
++}
++
+ # Look up which targets are configured
+ sub process_targets {
+ 	# We need to run as root
+@@ -152,6 +169,7 @@ sub add_targets {
+ 	my $configured = $_[1];
+ 	my $connected = $_[2];
+ 	my $in_configfile = $_[3];
++	my $isns_enabled = check_isns;
+ 	foreach my $k (sort keys %conf) {
+ 
+ 		if ($k eq "default-driver") {
+@@ -166,6 +184,22 @@ sub add_targets {
+ 			if ($conf{$k} eq "yes") {
+ 				$ignore_errors = 1;
+ 			}
++		} elsif (($k eq "iSNSAccessControl") || ($k eq "iSNSServerIP") ||
++			($k eq "iSNSServerPort")) {
++			if ($isns_enabled eq 0) {
++				check_if_hash_array($conf{$k}, $k);
++				execute("tgtadm --op update --mode sys --name $k -v $conf{$k}");
++			}
++		}
++	}
++	foreach my $k (sort keys %conf) {
++		if ($k eq "iSNS") {
++			if ($isns_enabled eq 0) {
++				check_if_hash_array($conf{$k}, $k);
++				execute("tgtadm --op update --mode sys --name $k -v $conf{$k}");
++			} else {
++				execute("# iSNS already enabled");
++			}
+ 		}
+ 	}
+ 
+@@ -287,8 +321,13 @@ sub check_if_hash_array {
+ 	my $check = $_[0];
+ 	my $definition = $_[1];
+ 	if (ref($check) eq 'ARRAY' || ref($check) eq "HASH") {
+-		print "Multiple '$definition' definitions in '$option' not allowed!\n";
+-		print "Check your config file for errors (target: $target).\n";
++		if ($option) {
++			print "Multiple '$definition' definitions in '$option' not allowed!\n";
++			print "Check your config file for errors (target: $target).\n";
++		} else {
++			print "Multiple '$definition' definitions not allowed!\n";
++			print "Check your config file for errors.\n";
++		}
+ 		exit 1;
+ 	}
+ }

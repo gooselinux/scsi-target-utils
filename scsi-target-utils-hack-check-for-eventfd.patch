@@ -1,0 +1,29 @@
+diff --git a/usr/bs_aio.c b/usr/bs_aio.c
+index 0d6a640..794018a 100644
+--- a/usr/bs_aio.c
++++ b/usr/bs_aio.c
+@@ -124,6 +124,11 @@ static int bs_aio_init(struct scsi_lu *lu)
+ 	struct bs_aio_info *info =
+ 		(struct bs_aio_info *) ((char *)lu + sizeof(*lu));
+ 
++	if (__NR_eventfd < 0) {
++		eprintf("aio not suppored on this ARCH at this time.\n");
++		return -1;
++	}
++
+ 	ret = io_setup(MAX_AIO_REQS, &info->ctx);
+ 	if (ret) {
+ 		eprintf("fail to create aio_queue, %m\n");
+diff --git a/usr/bs_aio.h b/usr/bs_aio.h
+index f62e99c..b5c4bf9 100644
+--- a/usr/bs_aio.h
++++ b/usr/bs_aio.h
+@@ -53,7 +53,7 @@ enum {
+ #elif defined(__sparc__) || defined(__sparc64__)
+ #define __NR_eventfd 313
+ #else
+-#error Cannot detect your architecture
++#define __NR_eventfd -1
+ #endif
+ #endif
+ 

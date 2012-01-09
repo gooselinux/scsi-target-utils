@@ -1,0 +1,415 @@
+diff --git a/usr/Makefile b/usr/Makefile
+index 2dcae2a..78be3e1 100644
+--- a/usr/Makefile
++++ b/usr/Makefile
+@@ -17,12 +17,13 @@ TGTD_OBJS += $(addprefix iscsi/, conn.o param.o session.o \
+ 		isns.o)
+ TGTD_OBJS += bs_rdwr.o bs_aio.o
+ 
+-ifneq ($(ISCSI_RDMA),)
+-CFLAGS += -DISCSI_RDMA
++ifneq ($(findstring verbs.h,$(wildcard /usr/include/infiniband/*.h)), )
++ifneq ($(findstring rdma_cma.h,$(wildcard /usr/include/rdma/*.h)), )
+ TGTD_OBJS += iscsi/iscsi_rdma.o
+ LIBS += -libverbs -lrdmacm
+ endif
+ endif
++endif
+ 
+ ifneq ($(FCP),)
+ CFLAGS += -DFCP -DUSE_KERNEL
+diff --git a/usr/iscsi/iscsi_rdma.c b/usr/iscsi/iscsi_rdma.c
+index 6cf5677..72e4eaf 100644
+--- a/usr/iscsi/iscsi_rdma.c
++++ b/usr/iscsi/iscsi_rdma.c
+@@ -30,6 +30,8 @@
+ #include <sys/epoll.h>
+ #include <infiniband/verbs.h>
+ #include <rdma/rdma_cma.h>
++#include <dlfcn.h>
++#include <syslog.h>
+ 
+ #include "util.h"
+ #include "iscsid.h"
+@@ -283,6 +285,67 @@ static void iser_sched_poll_cq(struct event_data *tev);
+ static void iser_sched_consume_cq(struct event_data *tev);
+ static void iser_sched_tx(struct event_data *evt);
+ 
++
++static void *pverbs;
++static void *prdma;
++typedef void (*ibv_ack_cq_events_t)(struct ibv_cq *cq, unsigned int nevents);
++typedef struct ibv_pd *(*ibv_alloc_pd_t)(struct ibv_context *context);
++typedef struct ibv_comp_channel *(*ibv_create_comp_channel_t)(struct ibv_context *context);
++typedef struct ibv_cq *(*ibv_create_cq_t)(struct ibv_context *context, int cqe,
++                              void *cq_context,
++                              struct ibv_comp_channel *channel,
++                              int comp_vector);
++typedef int (*ibv_dereg_mr_t)(struct ibv_mr *mr);
++typedef int (*ibv_destroy_qp_t)(struct ibv_qp *qp);
++typedef int (*ibv_get_cq_event_t)(struct ibv_comp_channel *channel,
++                      struct ibv_cq **cq, void **cq_context);
++typedef int (*ibv_query_device_t)(struct ibv_context *context,
++                      struct ibv_device_attr *device_attr);
++typedef struct ibv_mr *(*ibv_reg_mr_t)(struct ibv_pd *pd, void *addr,
++                          size_t length, enum ibv_access_flags access);
++typedef int (*rdma_ack_cm_event_t)(struct rdma_cm_event *event);
++typedef int (*rdma_bind_addr_t)(struct rdma_cm_id *id, struct sockaddr *addr);
++typedef struct rdma_event_channel *(*rdma_create_event_channel_t)(void);
++typedef int (*rdma_create_id_t)(struct rdma_event_channel *channel,
++                   struct rdma_cm_id **id, void *context,
++                   enum rdma_port_space ps);
++typedef int (*rdma_create_qp_t)(struct rdma_cm_id *id, struct ibv_pd *pd,
++                   struct ibv_qp_init_attr *qp_init_attr);
++typedef int (*rdma_destroy_id_t)(struct rdma_cm_id *id);
++typedef int (*rdma_disconnect_t)(struct rdma_cm_id *id);
++typedef int (*rdma_get_cm_event_t)(struct rdma_event_channel *channel,
++                      struct rdma_cm_event **event);
++typedef int (*rdma_listen_t)(struct rdma_cm_id *id, int backlog);
++typedef int (*rdma_accept_t)(struct rdma_cm_id *id, struct rdma_conn_param *conn_param);
++typedef int (*rdma_reject_t)(struct rdma_cm_id *id, const void *private_data,
++                uint8_t private_data_len);
++
++typedef struct {
++	ibv_ack_cq_events_t ibv_ack_cq_events;
++	ibv_alloc_pd_t ibv_alloc_pd;
++	ibv_create_comp_channel_t ibv_create_comp_channel;
++	ibv_create_cq_t ibv_create_cq;
++	ibv_dereg_mr_t ibv_dereg_mr;
++	ibv_destroy_qp_t ibv_destroy_qp;
++	ibv_get_cq_event_t ibv_get_cq_event;
++	ibv_query_device_t ibv_query_device;
++	ibv_reg_mr_t ibv_reg_mr;
++	rdma_ack_cm_event_t rdma_ack_cm_event;
++	rdma_bind_addr_t rdma_bind_addr;
++	rdma_create_event_channel_t rdma_create_event_channel;
++	rdma_create_id_t rdma_create_id;
++	rdma_create_qp_t rdma_create_qp;
++	rdma_destroy_id_t rdma_destroy_id;
++	rdma_disconnect_t rdma_disconnect;
++	rdma_get_cm_event_t rdma_get_cm_event;
++	rdma_listen_t rdma_listen;
++	rdma_accept_t rdma_accept;
++	rdma_reject_t rdma_reject;
++} tgt_fptr_t;
++
++static tgt_fptr_t tgt_fptr;
++
++
+ /*
+  * Called when ready for full feature, builds resources.
+  */
+@@ -308,7 +371,7 @@ static int iser_init_comm(struct conn_info *conn)
+ 		goto out;
+ 	}
+ 
+-	conn->srmr = ibv_reg_mr(conn->dev->pd, conn->srbuf, size,
++	conn->srmr = tgt_fptr.ibv_reg_mr(conn->dev->pd, conn->srbuf, size,
+ 				IBV_ACCESS_LOCAL_WRITE);
+ 	if (!conn->srmr) {
+ 		eprintf("register srbuf\n");
+@@ -415,7 +478,7 @@ static int iser_init_comm_login(struct conn_info *conn)
+ 		goto out;
+ 	}
+ 
+-	conn->srmr_login = ibv_reg_mr(conn->dev->pd, conn->srbuf_login, size,
++	conn->srmr_login = tgt_fptr.ibv_reg_mr(conn->dev->pd, conn->srbuf_login, size,
+ 				      IBV_ACCESS_LOCAL_WRITE);
+ 	if (!conn->srmr_login) {
+ 		eprintf("ibv_reg_mr srbuf failed\n");
+@@ -495,7 +558,7 @@ static void iser_free_comm(struct conn_info *ci)
+ 
+ 	/* release mr and free the lists */
+ 	dprintf("dereg mr %p\n", ci->srmr);
+-	ret = ibv_dereg_mr(ci->srmr);
++	ret = tgt_fptr.ibv_dereg_mr(ci->srmr);
+ 	if (ret)
+ 		eprintf("ibv_dereg_mr\n");
+ 	free(ci->srbuf);
+@@ -515,7 +578,7 @@ static void iser_free_comm_login(struct conn_info *ci)
+ 	dprintf("freeing, login phase %d\n", ci->login_phase);
+ 
+ 	/* release mr and free the lists */
+-	ret = ibv_dereg_mr(ci->srmr_login);
++	ret = tgt_fptr.ibv_dereg_mr(ci->srmr_login);
+ 	if (ret)
+ 		eprintf("ibv_dereg_mr\n");
+ 	free(ci->srbuf_login);
+@@ -546,7 +609,7 @@ static int iser_init_mempool(struct iser_device *dev)
+ 		return -ENOMEM;
+ 	}
+ 
+-	dev->mempool_mr = ibv_reg_mr(dev->pd, regbuf,
++	dev->mempool_mr = tgt_fptr.ibv_reg_mr(dev->pd, regbuf,
+ 				     mempool_num * mempool_size,
+ 				     IBV_ACCESS_LOCAL_WRITE);
+ 	if (!dev->mempool_mr) {
+@@ -583,7 +646,7 @@ static int iser_device_init(struct iser_device *dev)
+ 	int ret = -1;
+ 
+ 	dprintf("dev %p\n", dev);
+-	dev->pd = ibv_alloc_pd(dev->ibv_hndl);
++	dev->pd = tgt_fptr.ibv_alloc_pd(dev->ibv_hndl);
+ 	if (dev->pd == NULL) {
+ 		eprintf("ibv_alloc_pd failed\n");
+ 		goto out;
+@@ -595,7 +658,7 @@ static int iser_device_init(struct iser_device *dev)
+ 		goto out;
+ 	}
+ 
+-	ret = ibv_query_device(dev->ibv_hndl, &device_attr);
++	ret = tgt_fptr.ibv_query_device(dev->ibv_hndl, &device_attr);
+ 	if (ret < 0) {
+ 		eprintf("ibv_query_device: %m\n");
+ 		goto out;
+@@ -604,13 +667,13 @@ static int iser_device_init(struct iser_device *dev)
+ 	dprintf("max %d CQEs\n", cqe_num);
+ 
+ 	ret = -1;
+-	dev->cq_channel = ibv_create_comp_channel(dev->ibv_hndl);
++	dev->cq_channel = tgt_fptr.ibv_create_comp_channel(dev->ibv_hndl);
+ 	if (dev->cq_channel == NULL) {
+ 		eprintf("ibv_create_comp_channel failed: %m\n");
+ 		goto out;
+ 	}
+ 
+-	dev->cq = ibv_create_cq(dev->ibv_hndl, cqe_num, NULL,
++	dev->cq = tgt_fptr.ibv_create_cq(dev->ibv_hndl, cqe_num, NULL,
+ 				dev->cq_channel, 0);
+ 	if (dev->cq == NULL) {
+ 		eprintf("ibv_create_cq failed: %m\n");
+@@ -729,7 +792,7 @@ static void iser_accept_connection(struct rdma_cm_event *event)
+ 	/* only generate completion queue entries if requested */
+ 	qp_init_attr.sq_sig_all = 0;
+ 
+-	ret = rdma_create_qp(ci->cma_id, dev->pd, &qp_init_attr);
++	ret = tgt_fptr.rdma_create_qp(ci->cma_id, dev->pd, &qp_init_attr);
+ 	if (ret) {
+ 		eprintf("create qp failed\n");
+ 		goto free_conn;
+@@ -759,7 +822,7 @@ static void iser_accept_connection(struct rdma_cm_event *event)
+ 	}
+ 
+ 	/* now we can actually accept the connection */
+-	ret = rdma_accept(ci->cma_id, &conn_param);
++	ret = tgt_fptr.rdma_accept(ci->cma_id, &conn_param);
+ 	if (ret) {
+ 		eprintf("rdma_accept failed\n");
+ 		iser_free_comm_login(ci);
+@@ -772,7 +835,7 @@ free_conn:
+ 	conn_exit(conn);
+ 	free(ci);
+ reject:
+-	ret = rdma_reject(event->id, NULL, 0);
++	ret = tgt_fptr.rdma_reject(event->id, NULL, 0);
+ 	if (ret)
+ 		eprintf("rdma_reject failed: %s\n", strerror(-ret));
+ }
+@@ -836,7 +899,7 @@ static void iser_handle_rdmacm(int fd __attribute__((unused)),
+ 	struct rdma_cm_id *destroy_cm_id = NULL;
+ 
+ 	dprintf("entry\n");
+-	ret = rdma_get_cm_event(rdma_evt_channel, &event);
++	ret = tgt_fptr.rdma_get_cm_event(rdma_evt_channel, &event);
+ 	if (ret) {
+ 		eprintf("rdma_get_cm_event failed\n");
+ 		return;
+@@ -859,14 +922,14 @@ static void iser_handle_rdmacm(int fd __attribute__((unused)),
+ 		break;
+ 	}
+ 
+-	ret = rdma_ack_cm_event(event);
++	ret = tgt_fptr.rdma_ack_cm_event(event);
+ 	if (ret) {
+ 		eprintf("ack cm event failed\n");
+ 		return;
+ 	}
+ 
+ 	if (destroy_cm_id) {
+-		ret = rdma_destroy_id(destroy_cm_id);
++		ret = tgt_fptr.rdma_destroy_id(destroy_cm_id);
+ 		if (ret)
+ 			eprintf("rdma_destroy_id failed\n");
+ 	}
+@@ -1089,13 +1152,13 @@ static void iser_cqe_handler(int fd __attribute__((unused)),
+ 	void *cq_context;
+ 	int ret;
+ 
+-	ret = ibv_get_cq_event(dev->cq_channel, &dev->cq, &cq_context);
++	ret = tgt_fptr.ibv_get_cq_event(dev->cq_channel, &dev->cq, &cq_context);
+ 	if (ret != 0) {
+ 		eprintf("notification, but no CQ event\n");
+ 		exit(1);
+ 	}
+ 
+-	ibv_ack_cq_events(dev->cq, 1);
++    tgt_fptr.ibv_ack_cq_events(dev->cq, 1);
+ 
+ 	/* if a poll was previosuly scheduled, remove it,
+ 	   as it will be scheduled when necessary */
+@@ -1148,14 +1211,14 @@ static int iscsi_rdma_init(void)
+ 	struct sockaddr_in sock_addr;
+ 	short int port = iscsi_listen_port;
+ 
+-	rdma_evt_channel = rdma_create_event_channel();
++	rdma_evt_channel = tgt_fptr.rdma_create_event_channel();
+ 
+ 	if (!rdma_evt_channel) {
+ 		eprintf("cannot initialize RDMA; load kernel modules?\n");
+ 		return -1;
+ 	}
+ 
+-	ret = rdma_create_id(rdma_evt_channel, &cma_listen_id, NULL,
++	ret = tgt_fptr.rdma_create_id(rdma_evt_channel, &cma_listen_id, NULL,
+ 			     RDMA_PS_TCP);
+ 	if (ret) {
+ 		eprintf("rdma_create_id: %s\n", strerror(ret));
+@@ -1166,7 +1229,7 @@ static int iscsi_rdma_init(void)
+ 	sock_addr.sin_family = AF_INET;
+ 	sock_addr.sin_port = htons(port);
+ 	sock_addr.sin_addr.s_addr = INADDR_ANY;
+-	ret = rdma_bind_addr(cma_listen_id, (struct sockaddr *) &sock_addr);
++	ret = tgt_fptr.rdma_bind_addr(cma_listen_id, (struct sockaddr *) &sock_addr);
+ 	if (ret) {
+ 		if (ret == -1)
+ 			eprintf("rdma_bind_addr -1: %m\n");
+@@ -1176,7 +1239,7 @@ static int iscsi_rdma_init(void)
+ 	}
+ 
+ 	/* 0 == maximum backlog */
+-	ret = rdma_listen(cma_listen_id, 0);
++	ret = tgt_fptr.rdma_listen(cma_listen_id, 0);
+ 	if (ret) {
+ 		if (ret == -1)
+ 			eprintf("rdma_listen -1: %m\n");
+@@ -1574,7 +1637,7 @@ static size_t iscsi_rdma_close(struct iscsi_connection *conn)
+ 	struct conn_info *ci = RDMA_CONN(conn);
+ 	int ret;
+ 
+-	ret = rdma_disconnect(ci->cma_id);
++	ret = tgt_fptr.rdma_disconnect(ci->cma_id);
+ 	if (ret)
+ 		eprintf("rdma_disconnect: %s\n", strerror(-ret));
+ 	dprintf("did rdma_disconnect\n");
+@@ -1607,7 +1670,7 @@ static void iscsi_rdma_release(struct iscsi_connection *conn)
+ 		iser_free_comm(ci);
+ 
+ 	/* finally destory QP */
+-	ret = ibv_destroy_qp(ci->qp_hndl);
++	ret = tgt_fptr.ibv_destroy_qp(ci->qp_hndl);
+ 	if (ret)
+ 		eprintf("ibv_destroy_qp: %s\n", strerror(-ret));
+ 
+@@ -1744,7 +1807,112 @@ static struct iscsi_transport iscsi_iser = {
+ 	.ep_getpeername		= iscsi_rdma_getpeername,
+ };
+ 
++
++int is_dlerror(const char *symbol)
++{
++	char *error;
++
++	if ((error = dlerror()) != NULL) {
++		syslog(LOG_ERR, "symbol %s not found - %s", symbol, error);
++		return 1;
++	}
++	return 0;
++}
++
++
++
+ __attribute__((constructor)) static void iser_transport_init(void)
+ {
++	pverbs = dlopen("libibverbs.so.1",RTLD_LAZY);
++	if (!pverbs) {
++		goto Exit; /* do not register iser transport */
++	}
++
++	prdma = dlopen("librdmacm.so.1",RTLD_LAZY);
++	if (!prdma) {
++		goto Exit; /* do not register iser transport */
++	}
++
++	/* initialize function pointers */
++	tgt_fptr.ibv_ack_cq_events = dlsym(pverbs, "ibv_ack_cq_events");
++	if (is_dlerror("ibv_ack_cq_events"))
++		goto Exit;
++	tgt_fptr.ibv_alloc_pd = dlsym(pverbs, "ibv_alloc_pd");
++	if (is_dlerror("ibv_alloc_pd"))
++		goto Exit;
++	tgt_fptr.ibv_create_comp_channel = dlsym(pverbs, "ibv_create_comp_channel");
++	if (is_dlerror("ibv_create_comp_channel"))
++		goto Exit;
++	tgt_fptr.ibv_create_cq = dlsym(pverbs, "ibv_create_cq");
++	if (is_dlerror("ibv_create_cq"))
++		goto Exit;
++	tgt_fptr.ibv_dereg_mr = dlsym(pverbs, "ibv_dereg_mr");
++	if (is_dlerror("ibv_dereg_mr"))
++		goto Exit;
++	tgt_fptr.ibv_destroy_qp = dlsym(pverbs, "ibv_destroy_qp");
++	if (is_dlerror("ibv_destroy_qp"))
++		goto Exit;
++	tgt_fptr.ibv_get_cq_event = dlsym(pverbs, "ibv_get_cq_event");
++	if (is_dlerror("ibv_get_cq_event"))
++		goto Exit;
++	tgt_fptr.ibv_query_device = dlsym(pverbs, "ibv_query_device");
++	if (is_dlerror("ibv_query_device"))
++		goto Exit;
++	tgt_fptr.ibv_reg_mr = dlsym(pverbs, "ibv_reg_mr");
++	if (is_dlerror("ibv_reg_mr"))
++		goto Exit;
++	tgt_fptr.rdma_ack_cm_event = dlsym(prdma, "rdma_ack_cm_event");
++	if (is_dlerror("rdma_ack_cm_event"))
++		goto Exit;
++	tgt_fptr.rdma_bind_addr = dlsym(prdma, "rdma_bind_addr");
++	if (is_dlerror("rdma_bind_addr"))
++		goto Exit;
++	tgt_fptr.rdma_create_event_channel = dlsym(prdma, "rdma_create_event_channel");
++	if (is_dlerror("rdma_create_event_channel"))
++		goto Exit;
++	tgt_fptr.rdma_create_id = dlsym(prdma, "rdma_create_id");
++	if (is_dlerror("rdma_create_id"))
++		goto Exit;
++	tgt_fptr.rdma_create_qp = dlsym(prdma, "rdma_create_qp");
++	if (is_dlerror("rdma_create_qp"))
++		goto Exit;
++	tgt_fptr.rdma_destroy_id = dlsym(prdma, "rdma_destroy_id");
++	if (is_dlerror("rdma_destroy_id"))
++		goto Exit;
++	tgt_fptr.rdma_disconnect = dlsym(prdma, "rdma_disconnect");
++	if (is_dlerror("rdma_disconnect"))
++		goto Exit;
++	tgt_fptr.rdma_get_cm_event = dlsym(prdma, "rdma_get_cm_event");
++	if (is_dlerror("rdma_get_cm_event"))
++		goto Exit;
++	tgt_fptr.rdma_listen = dlsym(prdma, "rdma_listen");
++	if (is_dlerror("rdma_listen"))
++		goto Exit;
++	tgt_fptr.rdma_accept = dlsym(prdma, "rdma_accept");
++	if (is_dlerror("rdma_accept"))
++		goto Exit;
++	tgt_fptr.rdma_reject = dlsym(prdma, "rdma_reject");
++	if (is_dlerror("rdma_reject"))
++		goto Exit;
++
++	syslog(LOG_INFO, "iser transport register");
+ 	iscsi_transport_register(&iscsi_iser);
++	return;
++
++Exit:
++	syslog(LOG_ERR, "%s - iser transport not used", dlerror());
++	if (pverbs)
++		dlclose(pverbs);
++	if (prdma)
++		dlclose(prdma);
+ }
++
++__attribute__((destructor)) static void iser_transport_close(void)
++{
++	syslog(LOG_INFO, "iser transport register");
++	if (pverbs)
++		dlclose(pverbs);
++	if (prdma)
++		dlclose(prdma);
++}
++

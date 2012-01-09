@@ -1,0 +1,20 @@
+diff -aurp tgt-1.0.4/usr/iscsi/isns.c tgt-1.0.4.work/usr/iscsi/isns.c
+--- tgt-1.0.4/usr/iscsi/isns.c	2010-04-29 01:16:34.000000000 -0500
++++ tgt-1.0.4.work/usr/iscsi/isns.c	2010-07-11 05:23:02.000000000 -0500
+@@ -460,6 +460,7 @@ static void free_all_acl(struct iscsi_ta
+ 	while (!list_empty(&target->isns_list)) {
+ 		ini = list_first_entry(&target->isns_list, typeof(*ini), ilist);
+ 		list_del(&ini->ilist);
++		free(ini);
+ 	}
+ }
+ 
+@@ -912,7 +913,7 @@ int isns_init(void)
+ 		eprintf("getaddrinfo error %s\n", isns_addr);
+ 		return -1;
+ 	}
+-	memcpy(&ss, res->ai_addr, sizeof(ss));
++	memcpy(&ss, res->ai_addr, sizeof(*res->ai_addr));
+ 	freeaddrinfo(res);
+ 
+ 	rxbuf = calloc(2, BUFSIZE);

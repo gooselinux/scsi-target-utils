@@ -1,0 +1,78 @@
+diff -aurp tgt-1.0.4/scripts/tgt-admin tgt-1.0.4.work/scripts/tgt-admin
+--- tgt-1.0.4/scripts/tgt-admin	2010-05-05 09:39:20.000000000 -0500
++++ tgt-1.0.4.work/scripts/tgt-admin	2010-05-05 09:40:14.000000000 -0500
+@@ -89,6 +89,7 @@ my %tgtadm_output_tid;
+ my %tgtadm_output_name;
+ my @largest_tid;
+ my $next_tid;
++my %existing_accounts;
+ 
+ # Look up if iSNS is already on
+ sub check_isns {
+@@ -135,6 +136,21 @@ sub process_targets {
+ 	$next_tid = $largest_tid[$#largest_tid];
+ }
+ 
++sub process_accounts {
++	# We need to run as root
++	if ( $> ) {
++		die("You must be root to run this program.\n");
++	}
++
++	my @show_account = `tgtadm --op show --mode account`;
++	# Here, we create an array of accounts
++	foreach my $show_account_line (@show_account) {
++		if ( $show_account_line =~ m/^\s+(.*?)$/ ) {
++			$existing_accounts{$1} = 1;
++		}
++	}
++}
++
+ # Parse config file(s)
+ sub parse_configs {
+ 	# Parse the config
+@@ -677,8 +693,12 @@ sub process_options {
+ 		foreach my $incominguser (@value_arr) {
+ 			my @userpass = split(/ /, $incominguser);
+ 			check_value($userpass[1]);
+-			execute("tgtadm --lld $driver --mode account --op delete --user=$userpass[0]");
+-			execute("tgtadm --lld $driver --mode account --op new --user=$userpass[0] --password=$userpass[1]");
++			# Only delete or create account if it doesn't already exist
++			if (! exists $existing_accounts{$userpass[0]} ) {
++				execute("tgtadm --lld $driver --mode account --op delete --user=$userpass[0]");
++				execute("tgtadm --lld $driver --mode account --op new --user=$userpass[0] --password=$userpass[1]");
++				$existing_accounts{$userpass[0]} = 1;
++			}
+ 			execute("tgtadm --lld $driver --mode account --op bind --tid=$next_tid --user=$userpass[0]");
+ 		}
+ 	}
+@@ -691,8 +711,12 @@ sub process_options {
+ 		}
+ 		my @userpass = split(/ /, @$value[0]);
+ 		check_value($userpass[1]);
+-		execute("tgtadm --lld $driver --mode account --op delete --user=$userpass[0]");
+-		execute("tgtadm --lld $driver --mode account --op new --user=$userpass[0] --password=$userpass[1]");
++		# Only delete or create account if it doesn't already exist
++		if (! exists $existing_accounts{$userpass[0]} ) {
++			execute("tgtadm --lld $driver --mode account --op delete --user=$userpass[0]");
++			execute("tgtadm --lld $driver --mode account --op new --user=$userpass[0] --password=$userpass[1]");
++			$existing_accounts{$userpass[0]} = 1;
++		}
+ 		execute("tgtadm --lld $driver --mode account --op bind --tid=$next_tid --user=$userpass[0] --outgoing");
+ 	}
+ 
+@@ -1244,12 +1268,14 @@ sub execute {
+ 
+ if ($execute == 1) {
+ 	process_targets;
++	process_accounts;
+ 	parse_configs;
+ 	add_targets;
+ 	remove_targets;
+ } elsif ($delete ne 0) {
+ 	delete_targets;
+ } elsif ($update ne 0) {
++	process_accounts;
+ 	update_targets;
+ } elsif ($dump == 1) {
+ 	dump_config;
