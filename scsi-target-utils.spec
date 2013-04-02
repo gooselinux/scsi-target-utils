@@ -1,6 +1,6 @@
 Name:           scsi-target-utils
 Version:        1.0.4
-Release:        3%{?dist}
+Release:        3%{?dist}.1
 Summary:        The SCSI target daemon and utility programs
 
 Group:          System Environment/Daemons
@@ -24,6 +24,8 @@ Patch4:         scsi-target-utils-fix-shared-accts.patch
 Patch5:         scsi-target-utils-fix-isns-of.patch
 # Fix iSNS mem bugs
 Patch6:         scsi-target-utils-fix-isns-mem.patch
+# fix the buffer overflow bug before iscsi login
+Patch7:         scsi-target-utils-check-for-recv-state.patch
 
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root-%(%{__id_u} -n)
 
@@ -47,6 +49,7 @@ Currently, software iSCSI targets are supported.
 %patch4 -p1 -b .fix-shared-accts
 %patch5 -p1 -b .fix-isns-of
 %patch6 -p1 -b .fix-isns-mem
+%patch7 -p1 -b .check-for-recv-state
 
 %build
 pushd usr
@@ -110,6 +113,9 @@ fi
 
 
 %changelog
+* Mon Jan 17 2011 Mike Christie <mchristie@redhat.com> - 1.0.4-3.1
+- fix the buffer overflow bug before iscsi login (CVE-2011-0001)
+
 * Thu Jul 8 2010 Mike Christie <mchristie@redhat.com> - 1.0.4-3
 - 584426 Make init scripts LSB-compilant
 
